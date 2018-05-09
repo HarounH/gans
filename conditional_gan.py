@@ -1,3 +1,7 @@
+'''
+    Implementation of condition gan
+'''
+
 import os
 import sys
 import numpy as np
@@ -8,9 +12,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import datasets, transforms
 from torchvision.utils import make_grid, save_image
-# from tensorboardX import SummaryWriter
-# Datasets!
-from mnist import train_loader_maker, test_loader_maker, MNIST_SIZE
+from mnist import train_loader_maker, test_loader_maker, MNIST_SIZE, MNIST_N_LABELS
+
 
 
 # argparse
@@ -35,6 +38,7 @@ parser.add_argument('--seed', type=int, default=1337, metavar='S',
                     help='random seed (default: 1337)')
 parser.add_argument('--test_interval', type=int, default=10, metavar='N',
                     help='how many batches to wait before testing')
+
 args = parser.parse_args()
 args.cuda = args.cuda and torch.cuda.is_available()
 device = torch.device("cuda" if args.cuda else "cpu")
@@ -42,57 +46,58 @@ torch.manual_seed(args.seed)
 
 
 # Model definition
-class VanillaGAN(nn.Module):
-    def __init__(self, xdim, gdims, ddims):
-        super(VanillaGAN, self).__init__()
-        self.name = 'vanilla_gan'
+class ConditionalGAN(nn.Module):
+    def __init__(self, xdim, zdim, ydim, g_hdims, d_hdims, dropout=0.5):
+        super(ConditionalGAN, self).__init__()
+        self.name = 'conditional_gan'
+        # Generator
         generator = []
-        current_dim = gdims[0]
-        for i in range(1, len(gdims)):
-            generator.append(nn.Linear(current_dim, gdims[i]))
-            generator.append(nn.ReLU(True))
-            current_dim = gdims[i]
+        current_dim = zdim + ydim
+        for dim in g_hdims:
+            generator.append(nn.Linear(current_dim, dim))
+            generator.append(nn.LeakyReLU())
+            generator.append(nn.Dropout(p=dropout))
+            current_dim = dim
         generator.append(nn.Linear(current_dim, xdim))
         generator.append(nn.Sigmoid())
-
-        self.g = nn.Sequential(
-            *generator
-        )
+        self.g = nn.Sequential(*generator)
+        # Discriminator
         discriminator = []
-        current_dim = xdim
-        for i in range(len(ddims)):
-            discriminator.append(nn.Linear(current_dim, ddims[i]))
-            discriminator.append(nn.ReLU(True))
-            # discriminator.append(nn.Dropout(dropout_prob))
-            current_dim = ddims[i]
+        current_dim = xdim + ydim
+        for dim in d_hdims:
+            discriminator.append(nn.Linear(current_dim, dim))
+            discriminator.append(nn.LeakyReLU())
+            discriminator.append(nn.Dropout(p=dropout))
+            current_dim = dim
         discriminator.append(nn.Linear(current_dim, 1))
         discriminator.append(nn.Sigmoid())
-        self.d = nn.Sequential(
-            *discriminator
-        )
+        self.d = nn.Sequential(*discriminator)
 
-    def gen(self, z):
-        return self.g(z)
+    def gen(self, z, y):
+        return self.g(torch.cat([z, y], dim=1))
 
-    def disc(self, x):
-        return self.d(x)
+    def disc(self, x, y):
+        return self.d(torch.cat([x, y], dim=1))
 
-    def forward(self, x, z):
-        gen_x = self.gen(z)
-        return gen_x, self.disc(gen_x), self.disc(x)
-
+    def forward(self, x, z, y):
+        g_z = self.g(torch.cat([z, y], dim=1))
+        d_fake = self.d(torch.cat([g_z, y], dim=1))
+        d_real = self.d(torch.cat([x, y], dim=1))
+        return g_z, d_fake, d_real
 
 if __name__ == '__main__':
     xdim = int(np.prod(MNIST_SIZE))
+    ydim = MNIST_N_LABELS
     zdim = 100
-    model = VanillaGAN(xdim, [zdim, 128], [128])  # , dropout_prob=args.dropout_prob)
-    # import pdb; pdb.set_trace()
+    hdim = 128
+    model = ConditionalGAN(xdim, zdim, ydim, [hdim], [hdim])
     for parameter in model.parameters():
         if len(parameter.size()) > 1:
             # Xavier init - fan out
             parameter.data.normal_(mean=0, std=np.sqrt(2.0 / parameter.size()[1]))
         else:
             parameter.data.zero_()  # bias terms
+
     # import pdb; pdb.set_trace()
     d_optim = optim.Adam(model.d.parameters(), lr=args.dlr, betas=args.betas)
     g_optim = optim.Adam(model.g.parameters(), lr=args.glr, betas=args.betas)
@@ -109,16 +114,20 @@ if __name__ == '__main__':
         loss['d_loss'] = 0.0
         loss['g_loss'] = 0.0
         loss['count'] = 0
-        for x, _ in train_loader:
+        for x, y in train_loader:
             batch_size = x.size()[0]
+            yo = np.zeros([batch_size, MNIST_N_LABELS])
+            yo[np.arange(batch_size), y.numpy()] = 1
+            y = torch.from_numpy(yo).float()
+            # import pdb; pdb.set_trace()
             # Train!
             loss['count'] += batch_size
             x = x.view(batch_size, -1)
             z = torch.randn((batch_size, zdim))
             # import pdb; pdb.set_trace()
-            g_z = model.g(z)
-            d_fake = model.d(g_z)  # + args.d_noise_amp * torch.randn_like(g_z))
-            d_real = model.d(x)  # + args.d_noise_amp * torch.randn_like(x))
+            g_z = model.gen(z, y)
+            d_fake = model.disc(g_z, y)  # + args.d_noise_amp * torch.randn_like(g_z))
+            d_real = model.disc(x, y)  # + args.d_noise_amp * torch.randn_like(x))
 
             d_fake_loss = bce(d_fake, torch.zeros(batch_size, 1))
             d_real_loss = bce(d_real, torch.ones(batch_size, 1))
@@ -133,8 +142,8 @@ if __name__ == '__main__':
             d_optim.step()
 
             z = torch.randn((batch_size, zdim))
-            g_z = model.g(z)
-            d_fake = model.d(g_z)  # + args.d_noise_amp * torch.randn_like(g_z))
+            g_z = model.gen(z, y)
+            d_fake = model.disc(g_z, y)  # + args.d_noise_amp * torch.randn_like(g_z))
             g_loss = bce(d_fake, torch.ones(batch_size, 1))
             loss['g_loss'] += g_loss.item()
 
@@ -156,12 +165,15 @@ if __name__ == '__main__':
             model.d.eval()
             fakes = []
             reals = []
-            for x, _ in test_loader:
+            for x, y in test_loader:
                 # import pdb; pdb.set_trace()
                 mb = x.shape[0]
+                yo = np.zeros([mb, MNIST_N_LABELS])
+                yo[np.arange(mb), y.numpy()] = 1
+                y = torch.from_numpy(yo).float()
                 x = x.view(mb, -1)
                 z = torch.randn((mb, zdim))
-                gen_x, d_fake, d_real = model(x, z)
+                gen_x, d_fake, d_real = model(x, z, y)
                 fakes.append(bce(d_fake, torch.zeros(mb, 1)).item())
                 reals.append(bce(d_real, torch.ones(mb, 1)).item())
             print('eval[' + str(epoch) + '] fake', sum(fakes) / len(fakes))

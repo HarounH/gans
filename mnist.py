@@ -10,6 +10,7 @@ from torchvision import datasets, transforms
 from torchvision.utils import make_grid, save_image
 
 MNIST_SIZE = (28, 28)
+MNIST_N_LABELS = 10
 # Dataset - MNIST
 train_loader_maker = lambda batch_size: torch.utils.data.DataLoader(
     datasets.MNIST('../data', train=True, download=True,
