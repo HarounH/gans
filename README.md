@@ -14,3 +14,11 @@ Me learning GANs
 ## Conditional GAN notes
 - parameters similar to vanilla gan seem to work. at least for MNIST. Should consider making models a little more powerful.
 - dropout might kinda help (with the loss anyway)
+
+
+## InfoGAN notes
+- c|x requires softmax, not sigmoid. its a probability distrib
+- c|x can be coupled with D(x), but need not be
+- do infogans train slower (dL/#epochs)?
+- Why is zdim so much smaller?
+- WHY IS LEAKYRELU so BAD?!
