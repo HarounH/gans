@@ -22,3 +22,8 @@ Me learning GANs
 - do infogans train slower (dL/#epochs)?
 - Why is zdim so much smaller?
 - WHY IS LEAKYRELU so BAD?!
+
+## WGAN
+- smaller lr
+- weight clipping on critic needed for guarantees.
+- https://arxiv.org/pdf/1704.00028.pdf says we can use a gradient norm in loss instead... a little harder to implement, isn't it?
