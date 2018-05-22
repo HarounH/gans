@@ -27,3 +27,8 @@ Me learning GANs
 - smaller lr
 - weight clipping on critic needed for guarantees.
 - https://arxiv.org/pdf/1704.00028.pdf says we can use a gradient norm in loss instead... a little harder to implement, isn't it?
+
+## MRGAN
+- regularize training by using encoder.
+- having generator being able to generate encoded x makes it get modes. yay.
+- what exactly is the MDGAN?
