@@ -15,30 +15,30 @@ from torchvision.utils import make_grid, save_image
 # from tensorboardX import SummaryWriter
 # Datasets!
 from mnist import train_loader_maker, test_loader_maker, MNIST_SIZE
-from utils import initialize_parameters
+from utils import initialize_parameters, bce_loss, mse_loss
 
 # argparse
 parser = argparse.ArgumentParser(description='PyTorch MNIST Example')
-parser.add_argument('-b', '--batch_size', type=int, default=64, metavar='N',
-                    help='input batch size for training (default: 64)')
+parser.add_argument('-b', '--batch_size', type=int, default=32, metavar='N',
+                    help='input batch size for training (default: 32)')
 parser.add_argument('-tb', '--test_batch_size', type=int, default=64,
                     metavar='N',
                     help='input batch size for testing (default: 64)')
-parser.add_argument('--epochs', type=int, default=200, metavar='N',
+parser.add_argument('--epochs', type=int, default=70, metavar='N',
                     help='number of epochs to train (default: 200)')
-parser.add_argument('--dlr', type=float, default=0.001, metavar='LR',
-                    help='learning rate for discriminator (default: 0.001)')
-parser.add_argument('--glr', type=float, default=0.001, metavar='LR',
-                    help='learning rate for generator (default: 0.001)')
-parser.add_argument('--elr', type=float, default=0.001, metavar='LR',
-                    help='learning rate for encoder (default: 0.001)')
-parser.add_argument('--lambdas', type=float, nargs=2, default=(0.01, 0.01),
+parser.add_argument('--dlr', type=float, default=1e-4, metavar='LR',
+                    help='learning rate for discriminator (default: 1e-4)')
+parser.add_argument('--glr', type=float, default=1e-4, metavar='LR',
+                    help='learning rate for generator (default: 1e-4)')
+parser.add_argument('--elr', type=float, default=1e-4, metavar='LR',
+                    help='learning rate for encoder (default: 1e-4)')
+parser.add_argument('--lambdas', type=float, nargs=2, default=(1e-2, 1e-2),
                     help='lambdas from the MRGAN paper. Hyperparams for reg')
 parser.add_argument('--cuda', action='store_true', default=False,
                     help='enables CUDA training')
 parser.add_argument('--seed', type=int, default=1337, metavar='S',
                     help='random seed (default: 1337)')
-parser.add_argument('--test_interval', type=int, default=10, metavar='N',
+parser.add_argument('--test_interval', type=int, default=5, metavar='N',
                     help='how many batches to wait before testing')
 args = parser.parse_args()
 args.cuda = args.cuda and torch.cuda.is_available()
@@ -80,15 +80,16 @@ class MRGAN(nn.Module):
         disc.append(nn.Linear(current_dim, 1))
         disc.append(nn.Sigmoid())
         self.d1 = nn.Sequential(*disc)
-        disc = []
-        current_dim = xdim
-        for dim in ddims:
-            disc.append(nn.Linear(current_dim, dim))
-            disc.append(nn.ReLU(True))
-            current_dim = dim
-        disc.append(nn.Linear(current_dim, 1))
-        disc.append(nn.Sigmoid())
-        self.d2 = nn.Sequential(*disc)
+        if self.mdgan:
+            disc = []
+            current_dim = xdim
+            for dim in ddims:
+                disc.append(nn.Linear(current_dim, dim))
+                disc.append(nn.ReLU(True))
+                current_dim = dim
+            disc.append(nn.Linear(current_dim, 1))
+            disc.append(nn.Sigmoid())
+            self.d2 = nn.Sequential(*disc)
 
     def gen(self, z):
         return self.g(z)
@@ -110,17 +111,18 @@ if __name__ == '__main__':
     xdim = int(np.prod(MNIST_SIZE))
     zdim = 128
     model = MRGAN(xdim, zdim, [128], [128], [128])
-    initialize_parameters(model.parameters())
+    # initialize_parameters(model.parameters())
     e_optim = optim.Adam(model.e.parameters(), lr=args.elr)
     d1_optim = optim.Adam(model.d1.parameters(), lr=args.dlr)
-    d2_optim = optim.Adam(model.d2.parameters(), lr=args.dlr)
+    if model.mdgan:
+        d2_optim = optim.Adam(model.d2.parameters(), lr=args.dlr)
     g_optim = optim.Adam(model.g.parameters(), lr=args.glr)
 
     train_loader = train_loader_maker(args.batch_size)
     test_loader = test_loader_maker(args.test_batch_size)
 
-    bce = F.binary_cross_entropy
-    mse = F.mse_loss
+    bce = bce_loss(1e-8)  # F.binary_cross_entropy
+    mse = mse_loss  # F.mse_loss
     losses = []
 
     for epoch in range(args.epochs):
@@ -136,11 +138,12 @@ if __name__ == '__main__':
             x = x.view(mb, -1)
             # Manifold step
             ## discriminator 1
-            regen_x = model.gen(model.enc(x))
+            z = torch.randn((mb, zdim))
+            regen_x = model.gen(z)
             d_fake = model.disc1(regen_x)
             d_real = model.disc1(x)
-            d1_fake_loss = bce(d_fake, torch.zeros(mb, 1))
-            d1_real_loss = bce(d_real, torch.ones(mb, 1))
+            d1_fake_loss = bce(d_fake, torch.zeros(mb, 1))  # -torch.mean(torch.log(1 - d_fake + 1e-8))  #
+            d1_real_loss = bce(d_real, torch.ones(mb, 1))  # -torch.mean(torch.log(d_real + 1e-8))  #
             d1_loss = d1_fake_loss + d1_real_loss
             loss['d1_loss'] += d1_loss.item()
             d1_optim.zero_grad()
@@ -155,12 +158,14 @@ if __name__ == '__main__':
             regen_x = model.gen(model.enc(x))
             d1_regen = model.disc1(regen_x)
 
-            mse_loss = mse(regen_x, x)
-            d1_regen_loss = bce(d1_regen, torch.ones(mb, 1))
+            mse_loss_val = torch.sum((regen_x-x)**2, 1)
+            d1_regen_loss = bce(d1_regen, torch.ones(mb, 1))  # torch.log(d1_regen + 1e-8)  #
 
             g_loss = bce(d1_fake, torch.ones(mb, 1)) + \
-                args.lambdas[0] * d1_regen_loss + \
-                args.lambdas[1] * mse_loss
+                torch.mean(
+                    args.lambdas[0] * mse_loss_val +
+                    args.lambdas[1] * d1_regen_loss
+                    )
             loss['g_loss'] += g_loss.item()
             g_optim.zero_grad()
             g_loss.backward()
@@ -170,9 +175,12 @@ if __name__ == '__main__':
             regen_x = model.gen(model.enc(x))
             d1_regen = model.disc1(regen_x)
 
-            mse_loss = mse(regen_x, x)
-            d1_regen_loss = bce(d1_regen, torch.ones(mb, 1))
-            e_loss = mse_loss + d1_regen_loss
+            mse_loss_val = torch.sum((regen_x-x)**2, 1)
+            d1_regen_loss = bce(d1_regen, torch.ones(mb, 1))  # torch.log(d1_regen + 1e-8)  # 
+            e_loss = torch.mean(
+                args.lambdas[0] * mse_loss_val +
+                args.lambdas[1] * d1_regen_loss
+                )
             loss['e_loss'] += e_loss.item()
             e_optim.zero_grad()
             e_loss.backward()
